@@ -14,7 +14,6 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-
         pkgs = import nixpkgs {
           inherit system;
         };
@@ -28,7 +27,9 @@
             tkinter
           ]
         );
-
+        myApp = pkgs.writeShellScriptBin "audioMover" ''
+          ${pythonEnv}/bin/python ${./audio_manager.py} "$@"
+        '';
       in
       {
         devShells.default = pkgs.mkShell {
@@ -37,6 +38,7 @@
             pkgs.mp3gain
           ];
         };
+        packages.default = myApp;
       }
     );
 }
