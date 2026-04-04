@@ -3,12 +3,14 @@
 audio_manager.py — Recording workflow tool
 
 Usage:
-    python audio_manager.py [AUDIO_DIR] [WATCH_DIR]
+    python audio_manager.py [AUDIO_DIR] [WATCH_DIR] [DONE_DIR]
 
     AUDIO_DIR  folder containing your .mp3 + .webp source files
                (defaults to current working directory)
     WATCH_DIR  folder where Audacity exports its output
                (defaults to AUDIO_DIR/output)
+    DONE_DIR   folder where finished files are moved after Kid3 closes
+               (defaults to AUDIO_DIR/done)
 
 Workflow:
     1. Converts all .webp files in AUDIO_DIR to .png via ImageMagick
@@ -16,8 +18,9 @@ Workflow:
     3. Click a tile → opens that mp3 in Audacity; tile is marked "active"
     4. Watches WATCH_DIR for new audio files written by Audacity
     5. When the exported file stops changing for 3 s, embeds the active
-       item's .png as ID3 cover art, then opens the file in Kid3
-    6. Removes the tile from the UI and moves the source mp3 + png + webp
+       item's .png as ID3 cover art, runs mp3gain, then opens in Kid3
+    6. When Kid3 closes, moves the exported file to DONE_DIR
+    7. Removes the tile from the UI and moves the source mp3 + png + webp
        to the system trash
 """
 
@@ -39,6 +42,7 @@ import send2trash
 
 AUDIO_DIR    = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path.cwd()
 WATCH_DIR    = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else AUDIO_DIR / "output"
+DONE_DIR     = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 else AUDIO_DIR / "done"
 STABLE_SECS  = 3.0          # seconds of silence before a file is considered done
 THUMB_W      = 200          # thumbnail width  (px)
 THUMB_H      = 200          # thumbnail height (px)
@@ -417,9 +421,39 @@ class AudioManager(tk.Tk):
         self.after(0, lambda: self._set_status(f"embedding cover art into {path.name} …"))
 
         self._embed_cover(path, png)
-        subprocess.Popen(["kid3", str(path)])
+
+        self.after(0, lambda: self._set_status(f"running mp3gain on {path.name} …"))
+        print(f"[mp3gain] {path.name}")
+        subprocess.run(["mp3gain", "-r", "-k", str(path)])
+        print("[mp3gain] done")
+
+        self.after(0, lambda: self._set_status(f"Kid3 open — waiting for it to close …"))
+        proc = subprocess.Popen(["kid3", str(path)])
+        threading.Thread(
+            target=self._wait_for_kid3,
+            args=(proc, path),
+            daemon=True,
+        ).start()
 
         self.after(0, self._finish_active_item)
+
+    def _wait_for_kid3(self, proc: subprocess.Popen, path: Path):
+        """Background thread: waits for Kid3 to exit then moves file to DONE_DIR."""
+        proc.wait()
+        print(f"[kid3] closed — moving {path.name} to done/")
+        DONE_DIR.mkdir(parents=True, exist_ok=True)
+        dest = DONE_DIR / path.name
+        # If a file with the same name already exists, append a counter
+        counter = 1
+        while dest.exists():
+            dest = DONE_DIR / f"{path.stem}_{counter}{path.suffix}"
+            counter += 1
+        try:
+            path.rename(dest)
+            print(f"[done] {dest}")
+            self.after(0, lambda: self._set_status(f"moved to done/  →  {dest.name}"))
+        except Exception as exc:
+            print(f"[done] move failed: {exc}")
 
     def _embed_cover(self, audio_path: Path, png_path: Path):
         print(f"[cover] {png_path.name} → {audio_path.name}")
@@ -513,6 +547,7 @@ if __name__ == "__main__":
 
     print(f"[init] audio dir : {AUDIO_DIR}")
     print(f"[init] watch dir : {WATCH_DIR}")
+    print(f"[init] done dir  : {DONE_DIR}")
 
     app = AudioManager()
     app.mainloop()

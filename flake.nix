@@ -32,8 +32,10 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [ pythonEnv ];
-
+          buildInputs = [
+            pythonEnv
+            pkgs.mp3gain
+          ];
         };
       }
     );
