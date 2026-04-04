@@ -428,30 +428,49 @@ class AudioManager(tk.Tk):
         print("[mp3gain] done")
 
         self.after(0, lambda: self._set_status(f"Kid3 open — waiting for it to close …"))
+        inode = path.stat().st_ino
         proc = subprocess.Popen(["kid3", str(path)])
         threading.Thread(
             target=self._wait_for_kid3,
-            args=(proc, path),
+            args=(proc, inode),
             daemon=True,
         ).start()
 
         self.after(0, self._finish_active_item)
 
-    def _wait_for_kid3(self, proc: subprocess.Popen, path: Path):
-        """Background thread: waits for Kid3 to exit then moves file to DONE_DIR."""
+    def _wait_for_kid3(self, proc: subprocess.Popen, inode: int):
+        """Background thread: waits for Kid3 to exit then moves file to DONE_DIR.
+
+        Finds the file by inode so it works even if Kid3 renamed it.
+        """
         proc.wait()
-        print(f"[kid3] closed — moving {path.name} to done/")
+        print(f"[kid3] closed — searching {WATCH_DIR} for inode {inode}")
         DONE_DIR.mkdir(parents=True, exist_ok=True)
-        dest = DONE_DIR / path.name
-        # If a file with the same name already exists, append a counter
+
+        # Find the file by inode (Kid3 may have renamed it)
+        actual: Path | None = None
+        for candidate in WATCH_DIR.iterdir():
+            try:
+                if candidate.stat().st_ino == inode:
+                    actual = candidate
+                    break
+            except OSError:
+                pass
+
+        if actual is None:
+            print(f"[done] could not find file with inode {inode} in {WATCH_DIR}")
+            self.after(0, lambda: self._set_status("done — could not locate output file (renamed?)"))
+            return
+
+        dest = DONE_DIR / actual.name
         counter = 1
         while dest.exists():
-            dest = DONE_DIR / f"{path.stem}_{counter}{path.suffix}"
+            dest = DONE_DIR / f"{actual.stem}_{counter}{actual.suffix}"
             counter += 1
         try:
-            path.rename(dest)
-            print(f"[done] {dest}")
-            self.after(0, lambda: self._set_status(f"moved to done/  →  {dest.name}"))
+            actual.rename(dest)
+            print(f"[done] {actual.name} → {dest}")
+            self.after(0, lambda d=dest: self._set_status(f"moved to done/  →  {d.name}"))
         except Exception as exc:
             print(f"[done] move failed: {exc}")
 
