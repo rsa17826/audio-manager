@@ -451,7 +451,18 @@ class AudioManager(tk.Tk):
 
     self.after(0, lambda: self._set_status(f"running mp3gain on {path.name} …"))
     subprocess.run(["pkill", "-9", "audacity"])
-    subprocess.run(["rm", "-f", "/var/tmp/audacity-nyix/*.aup3unsaved*"])
+    directory = Path("/var/tmp/audacity-nyix/")
+    pattern = "*.aup3unsaved*"
+
+    # Iterate and delete
+    if directory.exists():
+      for file_path in directory.glob(pattern):
+        try:
+          file_path.unlink() # This is the 'rm' part
+        except OSError as e:
+          print(f"Error deleting {file_path}: {e}")
+    else:
+      print("Directory does not exist.")
     print(f"[mp3gain] {path.name}")
     subprocess.run(["mp3gain", "-r", "-k", str(path)])
     print("[mp3gain] done")
