@@ -450,6 +450,8 @@ class AudioManager(tk.Tk):
     self._embed_cover(path, png)
 
     self.after(0, lambda: self._set_status(f"running mp3gain on {path.name} …"))
+    subprocess.run(["pkill", "-9", "audacity"])
+    subprocess.run(["rm", "-f", "/var/tmp/audacity-nyix/*.aup3unsaved*"])
     print(f"[mp3gain] {path.name}")
     subprocess.run(["mp3gain", "-r", "-k", str(path)])
     print("[mp3gain] done")
