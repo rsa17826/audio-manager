@@ -266,12 +266,48 @@ class AudioManager(tk.Tk):
 
   # ── Item grid ──────────────────────────────────────────────────────────────
 
+  def _extract_embedded_cover(self, mp3: Path) -> Path | None:
+    """Try to extract the first APIC (cover art) frame from an mp3 as a png.
+
+    Saves the image next to the mp3 with a .png extension and returns the
+    path on success, or None if there is no embedded art or extraction fails.
+    """
+    try:
+      tags = ID3(str(mp3))
+    except ID3Error:
+      return None
+
+    apic_frames = tags.getall("APIC")
+    if not apic_frames:
+      return None
+
+    # Prefer type=3 (front cover); fall back to the first frame found.
+    cover_frame = next(
+      (f for f in apic_frames if f.type == 3), apic_frames[0]
+    )
+
+    png = mp3.with_suffix(".png")
+    try:
+      import io
+      img = Image.open(io.BytesIO(cover_frame.data)).convert("RGB")
+      img.save(png, "PNG")
+      print(f"[cover] extracted embedded art from {mp3.name} → {png.name}")
+      return png
+    except Exception as exc:
+      print(f"[cover] failed to extract art from {mp3.name}: {exc}")
+      return None
+
   def _load_items(self):
     mp3s = sorted(AUDIO_DIR.glob("*.mp3"))
     found = 0
     for mp3 in mp3s:
       png  = mp3.with_suffix(".png")
       webp = mp3.with_suffix(".webp")
+
+      # If no png on disk, try to pull one from embedded cover art.
+      if not png.exists():
+        png = self._extract_embedded_cover(mp3) or png
+
       if png.exists():
         self._add_item(mp3, png, webp if webp.exists() else None)
         found += 1
