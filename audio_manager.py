@@ -11,17 +11,6 @@ Usage:
     (defaults to AUDIO_DIR/output)
   DONE_DIR   folder where finished files are moved after Kid3 closes
     (defaults to AUDIO_DIR/done)
-
-Workflow:
-  1. Converts all .webp files in AUDIO_DIR to .png via ImageMagick
-  2. Shows a grid UI: each mp3 with its matching .png as cover thumbnail
-  3. Click a tile → opens that mp3 in Audacity; tile is marked "active"
-  4. Watches WATCH_DIR for new audio files written by Audacity
-  5. When the exported file stops changing for 3 s, embeds the active
-    item's .png as ID3 cover art, runs mp3gain, then opens in Kid3
-  6. When Kid3 closes, moves the exported file to DONE_DIR
-  7. Removes the tile from the UI and moves the source mp3 + png + webp
-    to the system trash
 """
 
 import os
@@ -30,7 +19,7 @@ import time
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import Canvas, ttk, messagebox
 from pathlib import Path
 from PIL import Image, ImageTk
 from mutagen.id3 import ID3, APIC, error as ID3Error
@@ -40,35 +29,32 @@ import send2trash
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-AUDIO_DIR    = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path.cwd()
-WATCH_DIR    = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else AUDIO_DIR / "output"
-DONE_DIR     = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 else AUDIO_DIR / "done"
-STABLE_SECS  = 3.0          # seconds of silence before a file is considered done
-THUMB_W      = 200          # thumbnail width  (px)
-THUMB_H      = 200          # thumbnail height (px)
-TILE_PAD     = 12           # padding around each tile
-WATCH_EXTS   = {".mp3", ".wav", ".flac", ".ogg", ".aiff", ".m4a"}
+AUDIO_DIR = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else Path.cwd()
+WATCH_DIR = (
+  Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else AUDIO_DIR / "output"
+)
+DONE_DIR = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 else AUDIO_DIR / "done"
+STABLE_SECS = 3.0 # seconds of silence before a file is considered done
+THUMB_W = 200 # thumbnail width  (px)
+THUMB_H = 200 # thumbnail height (px)
+TILE_PAD = 12 # padding around each tile
+WATCH_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aiff", ".m4a"}
 
 # ── Colours ────────────────────────────────────────────────────────────────────
-BG          = "#0d0d0d"
-BG2         = "#161616"
-BG3         = "#1f1f1f"
-ACCENT      = "#c8a96e"       # warm gold
-ACCENT2     = "#e8c98e"
-FG          = "#e8e8e8"
-FG_DIM      = "#666666"
-HIGHLIGHT   = "#2a2010"       # selected tile background
-BORDER_SEL  = "#c8a96e"
-
+BG = "#03030a"
+BG2 = "#0d0d1e"
+BG3 = "#12122c"
+ACCENT = "#30324a"
+ACCENT2 = "#336688"
+FG = "#c4cce8"
+FG_DIM = "#6a72a0"
+HIGHLIGHT = "#2a3a8a"
+BORDER_SEL = "#30324a"
 
 # ── File stabiliser ────────────────────────────────────────────────────────────
 
-class FileStabilizer:
-  """
-  Calls on_stable(path) once a file stops receiving write events for
-  STABLE_SECS seconds.  Thread-safe; timer resets on every new event.
-  """
 
+class FileStabilizer:
   def __init__(self, on_stable):
     self._on_stable = on_stable
     self._timers: dict[Path, threading.Timer] = {}
@@ -98,6 +84,7 @@ class FileStabilizer:
 
 # ── Watchdog handler ───────────────────────────────────────────────────────────
 
+
 class ExportHandler(FileSystemEventHandler):
   def __init__(self, stabilizer: FileStabilizer):
     self._stab = stabilizer
@@ -118,25 +105,29 @@ class ExportHandler(FileSystemEventHandler):
 
 # ── Main application ───────────────────────────────────────────────────────────
 
+
 class AudioManager(tk.Tk):
 
   def __init__(self):
     super().__init__()
     self.title("audio manager")
-    self.configure(bg=BG)
-    self.geometry("960x720")
-    self.minsize(400, 300)
+    _ = self.configure(bg=BG)
+    self.geometry("960x780")
+    self.minsize(400, 400)
 
-    self._active: dict | None = None          # currently selected item
-    self._items: dict[Path, dict] = {}         # mp3 → item dict
-    self._photo_refs: list = []                # keep Tk PhotoImage refs alive
+    self._active: dict | None = None
+    self._items: dict[Path, dict] = {}
+    self._photo_refs: list = []
     self._observer: Observer | None = None
     self._stabilizer: FileStabilizer | None = None
 
     self._apply_style()
     self._build_header()
-    self._build_canvas()
+
+    # Bottom components built first so canvas can fill remaining center space
     self._build_statusbar()
+    self._build_unmapped_shelf()
+    self._build_canvas()
 
     self._convert_webps()
     self._load_items()
@@ -145,15 +136,16 @@ class AudioManager(tk.Tk):
     self.bind("<Configure>", lambda e: self.after_idle(self._reflow))
     self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-  # ── Style ──────────────────────────────────────────────────────────────────
-
   def _apply_style(self):
     style = ttk.Style(self)
     style.theme_use("clam")
     style.configure(
       "Vertical.TScrollbar",
-      background=BG3, troughcolor=BG, bordercolor=BG,
-      arrowcolor=FG_DIM, relief="flat",
+      background=BG3,
+      troughcolor=BG,
+      bordercolor=BG,
+      arrowcolor=FG_DIM,
+      relief="flat",
     )
 
   # ── UI construction ────────────────────────────────────────────────────────
@@ -162,33 +154,39 @@ class AudioManager(tk.Tk):
     hdr = tk.Frame(self, bg=BG2, pady=0)
     hdr.pack(fill="x", side="top")
 
-    # thin accent line at very top
     tk.Frame(hdr, bg=ACCENT, height=2).pack(fill="x")
 
     inner = tk.Frame(hdr, bg=BG2, pady=14, padx=20)
     inner.pack(fill="x")
 
     tk.Label(
-      inner, text="AUDIO MANAGER",
-      bg=BG2, fg=ACCENT,
+      inner,
+      text="AUDIO MANAGER",
+      bg=BG2,
+      fg=ACCENT,
       font=("Courier", 13, "bold"),
     ).pack(side="left")
 
     self._active_var = tk.StringVar(value="— no file selected —")
     tk.Label(
-      inner, textvariable=self._active_var,
-      bg=BG2, fg=FG_DIM,
+      inner,
+      textvariable=self._active_var,
+      bg=BG2,
+      fg=FG_DIM,
       font=("Courier", 10),
     ).pack(side="right")
 
   def _build_canvas(self):
     container = tk.Frame(self, bg=BG)
-    container.pack(fill="both", expand=True)
+    container.pack(fill="both", expand=True, before=self._shelf_frame)
 
-    self._canvas = tk.Canvas(container, bg=BG, highlightthickness=0, bd=0)
-    vsb = ttk.Scrollbar(container, orient="vertical",
+    self._canvas: Canvas = tk.Canvas(container, bg=BG, highlightthickness=0, bd=0)
+    vsb = ttk.Scrollbar(
+      container,
+      orient="vertical",
       command=self._canvas.yview,
-      style="Vertical.TScrollbar")
+      style="Vertical.TScrollbar",
+    )
     self._canvas.configure(yscrollcommand=vsb.set)
 
     vsb.pack(side="right", fill="y")
@@ -199,27 +197,59 @@ class AudioManager(tk.Tk):
       (0, 0), window=self._grid_frame, anchor="nw"
     )
 
-    self._grid_frame.bind("<Configure>", self._on_frame_configure)
-    self._canvas.bind("<Configure>", self._on_canvas_configure)
-    self._canvas.bind_all("<MouseWheel>",  self._on_mousewheel)
-    self._canvas.bind_all("<Button-4>",    self._on_mousewheel)
-    self._canvas.bind_all("<Button-5>",    self._on_mousewheel)
+    _ = self._grid_frame.bind("<Configure>", self._on_frame_configure)
+    _ = self._canvas.bind("<Configure>", self._on_canvas_configure)
+    _ = self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+    _ = self._canvas.bind_all("<Button-4>", self._on_mousewheel)
+    _ = self._canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+  def _build_unmapped_shelf(self):
+    """Creates a bottom section dedicated to MP3s lacking companion artwork."""
+    self._shelf_frame = tk.Frame(self, bg=BG2, pady=5)
+    self._shelf_frame.pack(fill="x", side="bottom", before=self._bar_frame)
+
+    tk.Frame(self._shelf_frame, bg="#2a2a2a", height=1).pack(fill="x")
+
+    title_lbl = tk.Label(
+      self._shelf_frame,
+      text="UNMAPPED FILES (NO IMAGES) — CLICK TO COPY NAME:",
+      bg=BG2,
+      fg=ACCENT,
+      font=("Courier", 9, "bold"),
+      anchor="w",
+      padx=20,
+      pady=4,
+    )
+    title_lbl.pack(fill="x")
+
+    # Scrollable frame context for unmapped files if list gets long
+    container = tk.Frame(self._shelf_frame, bg=BG2, padx=20, pady=5)
+    container.pack(fill="x")
+
+    self._unmapped_container = tk.Frame(container, bg=BG2)
+    self._unmapped_container.pack(fill="x")
 
   def _build_statusbar(self):
-    bar = tk.Frame(self, bg=BG2, pady=0)
-    bar.pack(fill="x", side="bottom")
-    tk.Frame(bar, bg="#2a2a2a", height=1).pack(fill="x")
-    inner = tk.Frame(bar, bg=BG2, pady=8, padx=20)
+    self._bar_frame = tk.Frame(self, bg=BG2, pady=0)
+    self._bar_frame.pack(fill="x", side="bottom")
+    tk.Frame(self._bar_frame, bg="#2a2a2a", height=1).pack(fill="x")
+    inner = tk.Frame(self._bar_frame, bg=BG2, pady=8, padx=20)
     inner.pack(fill="x")
     self._status_var = tk.StringVar(value="ready")
     tk.Label(
-      inner, textvariable=self._status_var,
-      bg=BG2, fg=FG_DIM, font=("Courier", 9),
+      inner,
+      textvariable=self._status_var,
+      bg=BG2,
+      fg=FG_DIM,
+      font=("Courier", 9),
     ).pack(side="left")
     self._watch_var = tk.StringVar(value=f"watching  {WATCH_DIR}")
     tk.Label(
-      inner, textvariable=self._watch_var,
-      bg=BG2, fg=FG_DIM, font=("Courier", 9),
+      inner,
+      textvariable=self._watch_var,
+      bg=BG2,
+      fg=FG_DIM,
+      font=("Courier", 9),
     ).pack(side="right")
 
   # ── Canvas / scroll plumbing ───────────────────────────────────────────────
@@ -242,8 +272,13 @@ class AudioManager(tk.Tk):
   # ── WebP conversion ────────────────────────────────────────────────────────
 
   def _convert_webps(self):
-    webps = [p for p in AUDIO_DIR.glob("*.webp")
-      if not p.with_suffix(".png").exists()]
+    webps = [
+      p
+      for ext in ["webp", "jpg", "jpeg"]
+      for p in AUDIO_DIR.glob(f"*.{ext}")
+      if not p.with_suffix(".png").exists()
+    ]
+    print(webps)
     if not webps:
       return
     self._set_status(f"converting {len(webps)} webp file(s)…")
@@ -252,7 +287,8 @@ class AudioManager(tk.Tk):
       png = webp.with_suffix(".png")
       r = subprocess.run(
         ["magick", str(webp), str(png)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
       )
       if r.returncode != 0:
         print(f"[magick] failed on {webp.name}: {r.stderr.strip()}")
@@ -264,7 +300,7 @@ class AudioManager(tk.Tk):
     else:
       self._set_status("conversion complete")
 
-  # ── Item grid ──────────────────────────────────────────────────────────────
+  # ── Item grid & Unmapped files logic ────────────────────────────────────────
 
   def _extract_embedded_cover(self, mp3: Path) -> Path | None:
     """Try to extract the first APIC (cover art) frame from an mp3 as a png.
@@ -281,14 +317,12 @@ class AudioManager(tk.Tk):
     if not apic_frames:
       return None
 
-    # Prefer type=3 (front cover); fall back to the first frame found.
-    cover_frame = next(
-      (f for f in apic_frames if f.type == 3), apic_frames[0]
-    )
+    cover_frame = next((f for f in apic_frames if f.type == 3), apic_frames[0])
 
     png = mp3.with_suffix(".png")
     try:
       import io
+
       img = Image.open(io.BytesIO(cover_frame.data)).convert("RGB")
       img.save(png, "PNG")
       print(f"[cover] extracted embedded art from {mp3.name} → {png.name}")
@@ -300,19 +334,73 @@ class AudioManager(tk.Tk):
   def _load_items(self):
     mp3s = sorted(AUDIO_DIR.glob("*.mp3"))
     found = 0
+    unmapped_mp3s = []
+
     for mp3 in mp3s:
-      png  = mp3.with_suffix(".png")
+      png = mp3.with_suffix(".png")
       webp = mp3.with_suffix(".webp")
 
-      # If no png on disk, try to pull one from embedded cover art.
+      # If no png exists on disk, try looking inside the file's ID3 metadata
       if not png.exists():
         png = self._extract_embedded_cover(mp3) or png
 
       if png.exists():
         self._add_item(mp3, png, webp if webp.exists() else None)
         found += 1
+      else:
+        # If there is absolutely no system png or webp, it's unmapped
+        if not webp.exists():
+          unmapped_mp3s.append(mp3)
+
+    self._render_unmapped_shelf(unmapped_mp3s)
     self._set_status(f"{found} file(s) loaded — click a tile to open in Audacity")
     self._reflow()
+
+  def _render_unmapped_shelf(self, unmapped_list: list[Path]):
+    """Cleans out and updates the list of unmapped mp3s at the footer."""
+    for widget in self._unmapped_container.winfo_children():
+      widget.destroy()
+
+    if not unmapped_list:
+      lbl = tk.Label(
+        self._unmapped_container,
+        text="None! All MP3s have artwork.",
+        bg=BG2,
+        fg=FG_DIM,
+        font=("Courier", 9, "italic"),
+      )
+      lbl.pack(side="left", padx=5)
+      return
+
+    # Pack item elements inside a wrapping layout frame
+    row_frame = tk.Frame(self._unmapped_container, bg=BG2)
+    row_frame.pack(fill="x", side="top")
+
+    for mp3 in unmapped_list:
+      lbl = tk.Label(
+        row_frame,
+        text=f"[{mp3.name}]",
+        bg=BG3,
+        fg=FG,
+        font=("Courier", 9),
+        cursor="hand2",
+        padx=6,
+        pady=3,
+        relief="flat",
+      )
+      lbl.pack(side="left", padx=4, pady=4)
+
+      # Bind copy actions to click event
+      lbl.bind(
+        "<Button-1>", lambda e, name=mp3.name: self._copy_to_clipboard(name)
+      )
+      lbl.bind("<Enter>", lambda e, w=lbl: w.configure(fg=ACCENT, bg="#252525"))
+      lbl.bind("<Leave>", lambda e, w=lbl: w.configure(fg=FG, bg=BG3))
+
+  def _copy_to_clipboard(self, text: str):
+    self.clipboard_clear()
+    self.clipboard_append(text)
+    self._set_status(f"Copied to clipboard: '{text}'")
 
   def _add_item(self, mp3: Path, png: Path, webp: Path | None):
     if mp3 in self._items:
@@ -320,8 +408,11 @@ class AudioManager(tk.Tk):
 
     # ── Outer tile frame ──
     tile = tk.Frame(
-      self._grid_frame, bg=BG3,
-      padx=0, pady=0, cursor="hand2",
+      self._grid_frame,
+      bg=BG3,
+      padx=0,
+      pady=0,
+      cursor="hand2",
     )
 
     # ── Image ──
@@ -331,13 +422,23 @@ class AudioManager(tk.Tk):
     img_frame.pack(fill="x")
 
     if photo:
-      img_lbl = tk.Label(img_frame, image=photo, bg=BG3, cursor="hand2",
-        bd=0, highlightthickness=0)
+      img_lbl = tk.Label(
+        img_frame,
+        image=photo,
+        bg=BG3,
+        cursor="hand2",
+        bd=0,
+        highlightthickness=0,
+      )
       img_lbl.pack()
     else:
       placeholder = tk.Label(
-        img_frame, text="?", bg="#222", fg=FG_DIM,
-        width=THUMB_W // 10, height=THUMB_H // 20,
+        img_frame,
+        text="?",
+        bg="#222",
+        fg=FG_DIM,
+        width=THUMB_W // 10,
+        height=THUMB_H // 20,
         font=("Courier", 24),
       )
       placeholder.pack(ipady=THUMB_H // 4)
@@ -346,25 +447,32 @@ class AudioManager(tk.Tk):
     name = mp3.stem
     display_name = name if len(name) <= 28 else name[:25] + "…"
     lbl = tk.Label(
-      tile, text=display_name,
-      bg=BG3, fg=FG,
+      tile,
+      text=display_name,
+      bg=BG3,
+      fg=FG,
       font=("Courier", 8),
       wraplength=THUMB_W + 8,
       justify="center",
-      pady=8, padx=6,
+      pady=8,
+      padx=6,
     )
     lbl.pack(fill="x")
 
     # ── Bind clicks on every child ──
-    for widget in (tile, img_frame, lbl,*(img_frame.winfo_children())):
+    for widget in (tile, img_frame, lbl, *(img_frame.winfo_children())):
       widget.bind("<Button-1>", lambda e, m=mp3: self._on_click(m))
       widget.bind("<Button-3>", lambda e, m=mp3: self._on_rclick(m))
-      widget.bind("<Enter>",    lambda e, t=tile: self._hover(t, True))
-      widget.bind("<Leave>",    lambda e, t=tile: self._hover(t, False))
+      widget.bind("<Enter>", lambda e, t=tile: self._hover(t, True))
+      widget.bind("<Leave>", lambda e, t=tile: self._hover(t, False))
 
     item = {
-      "mp3": mp3, "png": png, "webp": webp,
-      "tile": tile, "photo": photo, "lbl": lbl,
+      "mp3": mp3,
+      "png": png,
+      "webp": webp,
+      "tile": tile,
+      "photo": photo,
+      "lbl": lbl,
       "img_frame": img_frame,
     }
     self._items[mp3] = item
@@ -388,11 +496,14 @@ class AudioManager(tk.Tk):
   def _reflow(self):
     available = self._canvas.winfo_width() or 960
     col_w = THUMB_W + TILE_PAD * 2 + 4
-    cols  = max(1, available // col_w)
+    cols = max(1, available // col_w)
     for idx, item in enumerate(self._items.values()):
       item["tile"].grid(
-        row=idx // cols, column=idx % cols,
-        padx=TILE_PAD, pady=TILE_PAD, sticky="n",
+        row=idx // cols,
+        column=idx % cols,
+        padx=TILE_PAD,
+        pady=TILE_PAD,
+        sticky="n",
       )
     self._on_frame_configure()
 
@@ -468,7 +579,8 @@ class AudioManager(tk.Tk):
     remaining = len(self._items)
     self._set_status(
       f"trashed — {remaining} file(s) remaining"
-      if remaining else "all files processed ✓"
+      if remaining
+      else "all files processed ✓"
     )
 
   # ── Export processing ──────────────────────────────────────────────────────
@@ -481,7 +593,9 @@ class AudioManager(tk.Tk):
       return
 
     png = self._active["png"]
-    self.after(0, lambda: self._set_status(f"embedding cover art into {path.name} …"))
+    self.after(
+      0, lambda: self._set_status(f"embedding cover art into {path.name} …")
+    )
 
     self._embed_cover(path, png)
 
@@ -490,11 +604,10 @@ class AudioManager(tk.Tk):
     directory = Path("/var/tmp/audacity-nyix/")
     pattern = "*.aup3unsaved*"
 
-    # Iterate and delete
     if directory.exists():
       for file_path in directory.glob(pattern):
         try:
-          file_path.unlink() # This is the 'rm' part
+          file_path.unlink()
         except OSError as e:
           print(f"Error deleting {file_path}: {e}")
     else:
@@ -503,7 +616,9 @@ class AudioManager(tk.Tk):
     subprocess.run(["mp3gain", "-r", "-k", str(path)])
     print("[mp3gain] done")
 
-    self.after(0, lambda: self._set_status(f"Kid3 open — waiting for it to close …"))
+    self.after(
+      0, lambda: self._set_status(f"Kid3 open — waiting for it to close …")
+    )
     inode = path.stat().st_ino
     proc = subprocess.Popen(["kid3", str(path)])
     threading.Thread(
@@ -535,7 +650,12 @@ class AudioManager(tk.Tk):
 
     if actual is None:
       print(f"[done] could not find file with inode {inode} in {WATCH_DIR}")
-      self.after(0, lambda: self._set_status("done — could not locate output file (renamed?)"))
+      self.after(
+        0,
+        lambda: self._set_status(
+          "done — could not locate output file (renamed?)"
+        ),
+      )
       return
 
     dest = DONE_DIR / actual.name
@@ -546,7 +666,9 @@ class AudioManager(tk.Tk):
     try:
       actual.rename(dest)
       print(f"[done] {actual.name} → {dest}")
-      self.after(0, lambda d=dest: self._set_status(f"moved to done/  →  {d.name}"))
+      self.after(
+        0, lambda d=dest: self._set_status(f"moved to done/  →  {d.name}")
+      )
     except Exception as exc:
       print(f"[done] move failed: {exc}")
 
@@ -562,21 +684,26 @@ class AudioManager(tk.Tk):
         img_data = fh.read()
 
       tags.delall("APIC")
-      tags.add(APIC(
-        encoding=3,        # UTF-8
-        mime="image/png",
-        type=3,            # Front cover
-        desc="Cover",
-        data=img_data,
-      ))
+      tags.add(
+        APIC(
+          encoding=3, # UTF-8
+          mime="image/png",
+          type=3, # Front cover
+          desc="Cover",
+          data=img_data,
+        )
+      )
       tags.save(str(audio_path))
       print("[cover] ✓ saved")
     except Exception as exc:
       print(f"[cover] ✗ {exc}")
-      self.after(0, lambda: messagebox.showwarning(
-        "Cover art failed",
-        f"Could not embed cover into {audio_path.name}:\n{exc}",
-      ))
+      self.after(
+        0,
+        lambda: messagebox.showwarning(
+          "Cover art failed",
+          f"Could not embed cover into {audio_path.name}:\n{exc}",
+        ),
+      )
 
   def _finish_active_item(self):
     """Remove tile from UI and trash source files (runs on main thread)."""
@@ -604,7 +731,8 @@ class AudioManager(tk.Tk):
     remaining = len(self._items)
     self._set_status(
       f"done — {remaining} file(s) remaining"
-      if remaining else "all files processed ✓"
+      if remaining
+      else "all files processed ✓"
     )
 
   # ── Watcher ────────────────────────────────────────────────────────────────
