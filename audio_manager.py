@@ -332,7 +332,7 @@ class AudioManager(tk.Tk):
       return None
 
   def _load_items(self):
-    mp3s = sorted(AUDIO_DIR.glob("*.mp3"))
+    mp3s = sorted(AUDIO_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
     found = 0
     unmapped_mp3s = []
 
